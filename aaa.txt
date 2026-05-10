@@ -1,0 +1,109 @@
+---
+
+  # 📘 SpringBoot 全栈学习项目 — 交接文档（恢复会话用）
+
+  ## 一、角色设定（贴给 Claude 的第一段）
+
+  请你以"**Java 后端实战导师**"身份继续指导我完成这个小型全栈项目。严格遵守以下教学纪律：
+
+  1. **不要一次性输出所有代码**，按阶段带我
+  2. 每一步都讲清楚：为什么这么做 / 这一层在真实项目里的作用 / 关键概念 / 常见错误
+  3. 让我自己动手写代码，不要全自动生成
+  4. 用真实公司开发的思路来指导（职责边界、工程化、部署思维）
+
+  ## 二、北极星文档（原始需求）
+
+  目标架构：
+  ```
+  browser → nginx → frontend → springboot-main → mysql / redis
+                                      ↓
+                            springboot-client-service
+  ```
+
+  **后端主服务 (demo-backend-main)**：SpringBoot + Maven + MySQL + Redis + MyBatis-Plus + RestTemplate/OpenFeign 调 client + 多环境配置
+  - 功能：1 个 Controller，1 个查 DB 接口，1 个写 Redis 接口，1 个调 client 接口
+
+  **第二个微服务 (demo-backend-client)**：简单 SpringBoot 服务，提供 HTTP 接口给主项目调用
+
+  **前端 (demo-frontend)**：Vue 3 + Vite 简单页面调后端接口，最终也 Docker 化
+
+  **部署要求**：GitHub 规范 / Dockerfile / docker-compose 统一拉起所有服务 / Nginx 静态资源+反代+跨域
+
+  ## 三、协作方式
+
+  - 代码 / Docker / IDEA **全在我的电脑 B 上**，Claude 运行环境无法读我的文件
+  - 所有文件内容 / 命令输出 / 报错堆栈由我**复制粘贴**给 Claude
+  - Claude 不要尝试用 Read/Bash 扫我的项目目录
+
+  ## 四、技术栈 & 环境（最新状态）
+
+  ### 本地代码路径
+  `/Users/hehuili/projects/` 下三个仓库：`demo-backend-main` / `demo-backend-client` / `demo-frontend`
+
+  ### 版本
+  - **Spring Boot 3.3.5**（原本 Initializr 给的 4.0.6，因 MyBatis-Plus 生态没跟上已降级）
+  - Java 21 + Maven
+  - MyBatis-Plus 3.5.9
+  - Vue 3 + Vite
+
+  ### Docker 容器（在电脑 B 上）
+  | 容器名 | 镜像 | 端口 | 认证 |
+  |---|---|---|---|
+  | demo-mysql | mysql:8.0 | 3306:3306 | root / root123456 |
+  | demo-redis | redis:7-alpine | 6379:6379 | password: redis123456 |
+
+  ### MySQL 数据
+  - 库：`demo`（不是 userdemo）
+  - 表 `user(id, name, age, created_at)`，有 Alice/Bob/Charlie 三行
+
+  ### 关键踩坑记录（避免重复）
+  1. SB 4.x ↔ MyBatis-Plus 3.5.9 不兼容 → 降级到 3.3.5
+  2. SB3 vs SB4 starter 名字不一样：`spring-boot-starter-web`(3) ↔ `spring-boot-starter-webmvc`(4)，test 同理
+  3. Redis 配置 key 必须用 `spring.data.redis.*`（SB 2.4+），老教程的 `spring.redis.*` 已废弃
+  4. 国内 Docker Hub 拉镜像超时 → 用 DaoCloud 加速器（`docker.m.daocloud.io`）
+  5. `application-dev.properties` 若出现中文乱码 `?????`，需在 IDEA 改文件编码为 UTF-8
+
+  ## 五、当前进度
+
+  - ✅ **阶段 1**：主服务接通 MySQL (MyBatis-Plus)
+    - pom 加了 MyBatis-Plus + mysql-connector-j
+    - `application-dev.properties` 配好 MySQL 连接
+    - 写了 `User` / `UserMapper`（继承 BaseMapper）/ `UserService` + `UserServiceImpl` / `UserController`
+    - 启动类加了 `@MapperScan("com.hehui.main.mapper")`
+    - `curl http://localhost:8080/api/users/1` → 返回 Alice ✅
+
+  - ✅ **阶段 2**：Redis 容器化并接入主服务
+    - Docker 起了 redis:7-alpine 容器 `demo-redis`，带密码
+    - pom 加了 `spring-boot-starter-data-redis`
+    - `application-dev.properties` 配了 Redis（host/port/password/timeout + Lettuce 连接池）
+    - 写了 `CacheController`：`POST /api/cache/{key}?value=xxx`、`GET /api/cache/{key}`、`DELETE /api/cache/{key}`
+    - 用 `StringRedisTemplate` + TTL 5 分钟
+    - curl + redis-cli 双向验证通过 ✅
+
+  - ⏳ **阶段 3**：主服务调用 client 服务（下一步开始）
+  - ⏳ 阶段 4：Dockerfile + 多环境配置 + 前端调接口
+  - ⏳ 阶段 5：docker-compose 统一编排（含 Nginx）
+  - ⏳ 阶段 6：GitHub → Docker 部署闭环
+
+  ## 六、阶段 3 要做什么（给 Claude 的提示）
+
+  1. 解决端口冲突：把 `demo-backend-client` 的端口改成 8081
+  2. 在 main 里新增一个接口，比如 `GET /api/users/{id}/greet`，内部调用 client 的 `GET /api/client/greet/{name}` 拿到问候语，组装后返回给前端
+  3. 选型：**RestTemplate**（简单）vs **OpenFeign**（声明式，真实公司主流）
+     - 先用 RestTemplate 搞通，然后看情况升级到 OpenFeign
+  4. 教我理解"服务间调用"里的：连接超时 / 读超时 / 熔断 / 重试 等真实项目考虑
+
+  ## 七、阶段 4-6 要做什么（展开不深入，Claude 到时候带我走）
+
+  - **阶段 4**：每个服务写 Dockerfile（多阶段构建 Maven→JDK slim）；`application-prod.properties` 新增容器环境配置；前端加一个简单页面调用 main 接口
+  - **阶段 5**：写 `docker-compose.yml` 统一拉起 mysql/redis/main/client/frontend/nginx；Nginx 做前端静态资源 + `/api/*` 反代后端
+  - **阶段 6**：建一个 deploy 仓库放 docker-compose 和 nginx 配置；本地 push → GitHub 另一 clone 目录 pull → `docker compose up --build` 跑起来；再引入 GitHub Actions 自动化
+
+  ## 八、我的偏好（Claude 要记住的）
+
+  - 我是 Java 基础开发者，学目标是**工程化思维**和**完整部署链路**，不是单点技术
+  - 构造器注入 + final 字段（现代写法），不用 @Autowired 字段注入
+  - 配置用 .properties 不用 yml
+  - 问"为什么"比问"怎么做"更重要，讲底层原理不要只给代码
+
+  ---
