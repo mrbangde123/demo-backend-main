@@ -68,6 +68,7 @@
   - ✅ **阶段 1**：主服务接通 MySQL (MyBatis-Plus)
     - pom 加了 MyBatis-Plus + mysql-connector-j
     - `application-dev.properties` 配好 MySQL 连接
+    - 建了 entity/mapper/service/service.impl/controller/config 六个包
     - 写了 `User` / `UserMapper`（继承 BaseMapper）/ `UserService` + `UserServiceImpl` / `UserController`
     - 启动类加了 `@MapperScan("com.hehui.main.mapper")`
     - `curl http://localhost:8080/api/users/1` → 返回 Alice ✅
@@ -80,22 +81,30 @@
     - 用 `StringRedisTemplate` + TTL 5 分钟
     - curl + redis-cli 双向验证通过 ✅
 
-  - ⏳ **阶段 3**：主服务调用 client 服务（下一步开始）
-  - ⏳ 阶段 4：Dockerfile + 多环境配置 + 前端调接口
+  - ✅ **阶段 3**：主服务调用 client 服务（RestTemplate）
+    - 把 client 端口从 8080 改成 8081，解决端口冲突
+    - main 里新建 `RestTemplateConfig`（`@Bean` 注册 RestTemplate）
+    - `UserController` 加了 `GET /api/users/{id}/greet`：先查 MySQL 拿用户名，再用 RestTemplate 调 client 的 `/api/client/greet/{name}`，组装返回
+    - `curl http://localhost:8080/api/users/1/greet` → `{"userId":1,"userName":"Alice","greeting":"Hi, Alice! Nice to meet you.","from":"demo-backend-client"}` ✅
+
+  - ⏳ **阶段 4**：Dockerfile + 多环境配置 + 前端（**当前进行中**）
+    - **4.1** main Dockerfile（多阶段构建）——**已讲完概念+代码，待执行 `docker build -t demo-backend-main:1.0 .`**
+    - **4.2** client Dockerfile——待讲
+    - **4.3** frontend Dockerfile——待讲
+    - **4.4** 多环境配置（application-prod.properties）+ 前端页面调后端接口——待讲
+
   - ⏳ 阶段 5：docker-compose 统一编排（含 Nginx）
   - ⏳ 阶段 6：GitHub → Docker 部署闭环
 
-  ## 六、阶段 3 要做什么（给 Claude 的提示）
+  ## 六、阶段 4 下一步具体动作（给 Claude 的提示）
 
-  1. 解决端口冲突：把 `demo-backend-client` 的端口改成 8081
-  2. 在 main 里新增一个接口，比如 `GET /api/users/{id}/greet`，内部调用 client 的 `GET /api/client/greet/{name}` 拿到问候语，组装后返回给前端
-  3. 选型：**RestTemplate**（简单）vs **OpenFeign**（声明式，真实公司主流）
-     - 先用 RestTemplate 搞通，然后看情况升级到 OpenFeign
-  4. 教我理解"服务间调用"里的：连接超时 / 读超时 / 熔断 / 重试 等真实项目考虑
+  1. 用户执行 `docker build -t demo-backend-main:1.0 .` 构建 main 镜像，然后 `docker images` 确认
+  2. 给 `demo-backend-client` 写类似的 Dockerfile（注意端口 8081）
+  3. 给 `demo-frontend` 写 Dockerfile（基于 node 构建 + nginx 运行静态资源）
+  4. 写 `application-prod.properties`：MySQL 地址从 localhost 改成容器名 `demo-mysql`，Redis 改成 `demo-redis`，client URL 改成 `http://demo-backend-client:8081`
+  5. 前端加一个简单页面调用 main 的接口
 
-  ## 七、阶段 4-6 要做什么（展开不深入，Claude 到时候带我走）
-
-  - **阶段 4**：每个服务写 Dockerfile（多阶段构建 Maven→JDK slim）；`application-prod.properties` 新增容器环境配置；前端加一个简单页面调用 main 接口
+  ## 七、阶段 5-6 要做什么（展开不深入，Claude 到时候带我走）
   - **阶段 5**：写 `docker-compose.yml` 统一拉起 mysql/redis/main/client/frontend/nginx；Nginx 做前端静态资源 + `/api/*` 反代后端
   - **阶段 6**：建一个 deploy 仓库放 docker-compose 和 nginx 配置；本地 push → GitHub 另一 clone 目录 pull → `docker compose up --build` 跑起来；再引入 GitHub Actions 自动化
 
@@ -105,5 +114,27 @@
   - 构造器注入 + final 字段（现代写法），不用 @Autowired 字段注入
   - 配置用 .properties 不用 yml
   - 问"为什么"比问"怎么做"更重要，讲底层原理不要只给代码
+  - 项目完成后还想学：权限验证（Spring Security / Sa-Token）、消息队列、Nacos 等扩展方向，但**当前 6 阶段不引入**
+
+  ## 九、main 的 Dockerfile（已写好待构建）
+
+  ```dockerfile
+  # ===== 阶段 1：编译 =====
+  FROM maven:3.9-eclipse-temurin-21 AS builder
+  WORKDIR /app
+  COPY pom.xml .
+  RUN mvn dependency:go-offline -B
+  COPY src ./src
+  RUN mvn package -DskipTests -B
+
+  # ===== 阶段 2：运行 =====
+  FROM eclipse-temurin:21-jre-alpine
+  WORKDIR /app
+  COPY --from=builder /app/target/*.jar app.jar
+  EXPOSE 8080
+  ENTRYPOINT ["java", "-jar", "app.jar"]
+  ```
+
+  构建命令：`docker build -t demo-backend-main:1.0 .`（在 demo-backend-main 根目录执行）
 
   ---
