@@ -20,12 +20,17 @@ public class UserController {
     private final UserService userService;
     private final RestTemplate restTemplate;
     private final String clientUrl;
+    private final String envName;
+
+
 
     public UserController(UserService userService, RestTemplate restTemplate,
-                          @Value("${app.client-url}") String clientUrl) {
+                          @Value("${app.client-url}") String clientUrl,
+                          @Value("${app.env-name}") String envName) {
         this.userService = userService;
         this.restTemplate = restTemplate;
         this.clientUrl = clientUrl;
+        this.envName = envName;
     }
 
     @GetMapping("/{id}")
@@ -52,4 +57,12 @@ public class UserController {
         result.put("from", clientResult.get("from"));
         return result;
     }
+
+
+    @GetMapping("/hello")
+    public Map<String, String> hello() {
+        return Map.of("message", "Hello from demo-backend-main!", "env", envName);
+    }
+
+
 }
