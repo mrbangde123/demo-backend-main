@@ -1,0 +1,370 @@
+docker run -d --name demo-mysql -p 3306:3306 ...
+docker run -d --name demo-redis -p 6379:6379 ...
+docker run -d --name demo-main -p 8080:8080 ...
+docker run -d --name demo-client -p 8081:8081 ...
+docker run -d --name demo-frontend -p 80:80 ...
+
+# nginx 还没起...
+
+6 个容器你要敲 6 条命令，还要保证启动顺序（MySQL 没起来 main 就连不上）、网络互通（容器之间要能互相访问）。很容易出错，也很难复现。
+
+docker-compose.yml 就是把所有容器的配置写在一个文件里，然后一条命令全部搞定：
+
+docker compose up -d      # 一键启动所有容器
+docker compose down        # 一键停止所有容器
+docker compose logs -f     # 一键看所有容器日志
+
+和你公司 K8s 的关系：docker-compose 是 K8s 的"简化版"。K8s 用 deployment.yaml 描述服务，docker-compose 用 docker-compose.yml 描述服务——理念完全一样，只是 docker-compose 更简单、适合单机。
+
+最终目录结构：
+
+  /Users/hehuili/projects/
+  ├── demo-backend-main/      ← 代码仓库
+  ├── demo-backend-client/    ← 代码仓库
+  ├── demo-frontend/          ← 代码仓库
+  └── demo-deploy/            ← 部署目录（新建）
+      ├── docker-compose.yml  ← 编排文件（接下来写）
+      └── nginx/
+          └── default.conf    ← Nginx 配置（5.2 写）
+
+  为什么单独建一个 deploy 目录：
+
+  1. 代码和部署配置解耦——改代码不用动部署文件，改部署配置不用动代码
+  2. 真实公司里"部署配置"通常由运维/SRE 管理，和开发代码不在一个仓库
+  3. 阶段 6 做 GitHub 部署闭环时，这个目录会变成一个独立的 Git 仓库
+
+
+MySQL 服务逐行讲
+
+    mysql:                          # 服务名（docker-compose 内部用的标识）
+      image: mysql:8.0              # 用哪个镜像（直接从 Docker Hub 拉取，不用 build）
+      container_name: demo-mysql    # 容器名（就是其他容器用来访问的主机名）
+      ports:
+        - "3306:3306"               # 端口映射：宿主机:容器
+      environment:                   # 环境变量（传给容器内部）
+        MYSQL_ROOT_PASSWORD: root123456   # MySQL root 密码
+        MYSQL_DATABASE: demo               # 启动时自动创建 demo 库
+      volumes:
+        - mysql-data:/var/lib/mysql  # 数据持久化（下面详细讲）
+      networks:
+        - demo-net                   # 加入 demo-net 网络
+
+
+MYSQL_DATABASE: demo：这个环境变量让 MySQL 容器首次启动时自动创建 demo 数据库。之前你是手动 CREATE DATABASE 的，现在自动化了。但是表不会自动建——MySQL
+  容器第一次启动后，你需要手动进容器建表（或者后面我们加一个初始化 SQL 脚本）。
+
+  volumes: mysql-data:/var/lib/mysql：这是数据持久化，非常重要——详细讲一下。
+
+  volumes 数据持久化（重点理解）
+
+  Docker 容器是临时的——如果你 docker compose down 删掉容器，容器里的所有数据（数据库里的表、Redis 里的 key）都会消失。
+
+  volumes 就是把容器里的数据目录"挂载"到宿主机的一个持久化存储上：
+
+  没有 volumes:
+    容器运行 → 数据在容器内 → 容器删除 → 数据没了 ❌
+
+  有 volumes:
+    容器运行 → 数据写到 mysql-data 这个持久卷 → 容器删除 → 数据还在 ✅
+                                          ↓
+                              下次 docker compose up → 新容器挂载同一个卷 → 数据还在
+
+  mysql-data 是卷名，定义在文件底部的 volumes: 区域。Docker 会在宿主机上找个地方（/var/lib/docker/volumes/ 下）存这个卷，你不用操心具体在哪。
+
+  真实项目里必须给数据库做 volumes——否则每次重启容器数据库就清空了，谁也接受不了。
+
+  Redis 服务逐行讲
+
+    redis:
+      image: redis:7-alpine         # 直接用镜像，不需要 build
+      container_name: demo-redis    # 容器名（就是其他容器用来访问的主机名）
+      ports:
+        - "6379:6379"
+      command: redis-server --requirepass redis123456   # 启动命令（覆盖默认命令）
+      networks:
+        - demo-net
+
+  command:：覆盖容器默认的启动命令。相当于你之前 docker run 时写在最后的 redis-server --requirepass redis123456。
+
+  Redis 没有 volumes：Redis 是内存数据库，重启后数据本来就会丢，学习项目不需要持久化。真实项目如果需要 Redis 数据持久化，会加 command: redis-server --requirepass xxx --appendonly yes 开启 AOF 持久化。
+
+  main 服务逐行讲
+
+    backend-main:
+      build:                              # 不用现成镜像，要从源码构建
+        context: ../demo-backend-main     # Dockerfile 所在目录（相对路径）
+        dockerfile: Dockerfile            # Dockerfile 文件名
+      container_name: demo-backend-main
+      ports:
+        - "8080:8080"
+      environment:
+        SPRING_PROFILES_ACTIVE: prod      # 激活 prod 配置文件！
+      depends_on:
+        - mysql                           # 等 mysql 先启动
+        - redis                           # 等 redis 先启动
+      networks:
+        - demo-net
+
+  build vs image：
+
+  ┌─────────────────────┬────────────────┬───────────────────────────────────┐
+  │        方式         │      含义      │            什么时候用             │
+  ├─────────────────────┼────────────────┼───────────────────────────────────┤
+  │ image: mysql:8.0    │ 直接用现成镜像 │ 第三方服务（MySQL、Redis、Nginx） │
+  ├─────────────────────┼────────────────┼───────────────────────────────────┤
+  │ build: context: ... │ 从源码构建镜像 │ 你自己的业务服务                  │
+  └─────────────────────┴────────────────┴───────────────────────────────────┘
+
+  context: ../demo-backend-main：告诉 Docker "去这个目录找 Dockerfile 和源码"。../ 是因为 docker-compose.yml 在 demo-deploy/ 下，而代码在上一级的 demo-backend-main/。
+
+    SPRING_PROFILES_ACTIVE: prod：这是整阶段 4.4 的核心——通过环境变量告诉 Spring Boot "用 prod 配置"，这样容器内就会读 application-prod.properties，用 demo-mysql、demo-redis 这些容器名连数据库。
+
+    depends_on: mysql, redis：告诉 docker-compose "main 要等 MySQL 和 Redis 先启动"。但这只保证启动顺序，不保证 MySQL 已经准备好接受连接——MySQL 启动后还需要几秒钟初始化，main
+    可能在这期间连不上。真实项目会用 healthcheck 或启动脚本重试，学习项目先不管，如果 main 启动报连不上数据库，手动 docker compose restart backend-main 就行。
+
+    Client 服务逐行讲
+
+      backend-client:
+        build:
+          context: ../demo-backend-client
+          dockerfile: Dockerfile
+        container_name: demo-backend-client
+        ports:
+          - "8081:8081"
+        environment:
+          SPRING_PROFILES_ACTIVE: prod
+        networks:
+          - demo-net
+
+    和 main 一样，只是端口 8081、没有 depends_on（client 不依赖别人）。
+
+    前端服务逐行讲
+
+      frontend:
+        build:
+          context: ../demo-frontend
+          dockerfile: Dockerfile
+        container_name: demo-frontend
+        networks:
+          - demo-net
+
+    没有 ports：前端不直接对外暴露端口，而是通过 Nginx 代理访问。用户访问 localhost:80 → Nginx → frontend 容器内部 80 端口。这样所有流量都走 Nginx 一个入口，架构更清晰。
+
+    Nginx 服务逐行讲
+
+      nginx:
+        image: nginx:alpine
+        container_name: demo-nginx
+        ports:
+          - "80:80"                      # 唯一对外暴露的端口！
+        volumes:
+          - ./nginx/default.conf:/etc/nginx/conf.d/default.conf   # 挂载配置文件
+        depends_on:
+          - backend-main
+          - frontend
+        networks:
+          - demo-net
+
+    ports: "80:80"：这是用户唯一需要访问的端口。浏览器打开 http://localhost 就走这个。
+
+    volumes: ./nginx/default.conf:/etc/nginx/conf.d/default.conf：把宿主机上的 Nginx 配置文件"挂载"进容器。这样你改了 default.conf 不用重新构建镜像，docker compose restart nginx 就生效。
+
+    ┌─────────────────────────────────┬────────────────────────────────────────────┐
+    │              写法               │                    含义                    │
+    ├─────────────────────────────────┼────────────────────────────────────────────┤
+    │ ./nginx/default.conf            │ 宿主机路径（相对于 docker-compose.yml）    │
+    ├─────────────────────────────────┼────────────────────────────────────────────┤
+    │ :/etc/nginx/conf.d/default.conf │ 容器内路径（Nginx 默认加载这个位置的配置） │
+    └─────────────────────────────────┴────────────────────────────────────────────┘
+
+    这个文件我们 5.2 再创建。
+
+    networks: demo-net
+
+    networks:
+      demo-net:
+        driver: bridge
+
+    定义一个自定义网络 demo-net。所有加入这个网络的容器可以用容器名互相访问。
+
+    没有自定义网络:
+      容器之间默认隔离，不能用容器名访问 ❌
+
+    有自定义网络 demo-net:
+      main 容器里 ping demo-mysql → 通 ✅
+      main 容器里 ping demo-redis → 通 ✅
+      nginx 容器里 ping demo-backend-main → 通 ✅
+
+    driver: bridge 是默认网络模式，学习项目用这个就行。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    在 demo-deploy/nginx/ 目录下新建 default.conf：
+
+      server {
+          listen 80;
+          server_name localhost;
+
+          # ===== 前端静态资源 =====
+          location / {
+              proxy_pass http://demo-frontend:80;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+          }
+
+          # ===== 后端接口反向代理 =====
+          location /api/ {
+              proxy_pass http://demo-backend-main:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+
+          # ===== 健康检查接口 =====
+          location /health {
+              proxy_pass http://demo-backend-main:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+          }
+      }
+
+      ---
+      逐块详细讲解
+
+      server { listen 80; server_name localhost; }
+
+      server {
+          listen 80;              # Nginx 监听 80 端口（HTTP 默认端口）
+          server_name localhost;  # 匹配的域名（本地就是 localhost）
+      }
+
+      这是一个虚拟主机配置块。一个 Nginx 可以同时跑多个 server 块，每个监听不同端口或不同域名。我们只需要一个。
+
+      listen 80：用户访问 http://localhost（默认就是 80 端口，浏览器会自动补）就进入这个 server 块。
+
+      前端静态资源块
+
+          location / {
+              proxy_pass http://demo-frontend:80;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+          }
+
+      逐行拆解：
+
+      ┌─────────────────────────────────────────┬───────────────────────────────────────────────────┐
+      │                   行                    │                       含义                        │
+      ├─────────────────────────────────────────┼───────────────────────────────────────────────────┤
+      │ location /                              │ 匹配所有以 / 开头的路径——也就是所有请求的默认兜底 │
+      ├─────────────────────────────────────────┼───────────────────────────────────────────────────┤
+      │ proxy_pass http://demo-frontend:80      │ 把请求转发给 demo-frontend 容器的 80 端口         │
+      ├─────────────────────────────────────────┼───────────────────────────────────────────────────┤
+      │ proxy_set_header Host $host             │ 把原始请求的 Host 头传给前端容器                  │
+      ├─────────────────────────────────────────┼───────────────────────────────────────────────────┤
+      │ proxy_set_header X-Real-IP $remote_addr │ 把用户的真实 IP 传给前端容器                      │
+      └─────────────────────────────────────────┴───────────────────────────────────────────────────┘
+
+      location / 是"兜底规则"——Nginx 从上到下匹配 location，如果都不匹配，就走这个。所有非 /api/ 开头的请求（比如 /、/index.html、/assets/xxx.js）都会转到前端。
+
+      proxy_pass http://demo-frontend:80 里的 demo-frontend 是容器名——和之前 application-prod.properties 里用 demo-mysql 连数据库是同一个原理。Nginx 容器在 demo-net 网络里，可以通过容器名访问其他容器。
+
+      后端接口反向代理块
+
+          location /api/ {
+              proxy_pass http://demo-backend-main:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+
+      逐行拆解：
+
+      ┌─────────────────────────────────────────────────────────────┬──────────────────────────────────┐
+      │                             行                              │               含义               │
+      ├─────────────────────────────────────────────────────────────┼──────────────────────────────────┤
+      │ location /api/                                              │ 匹配所有以 /api/ 开头的路径      │
+      ├─────────────────────────────────────────────────────────────┼──────────────────────────────────┤
+      │ proxy_pass http://demo-backend-main:8080                    │ 转发给 main 容器的 8080 端口     │
+      ├─────────────────────────────────────────────────────────────┼──────────────────────────────────┤
+      │ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for │ 记录请求经过的所有代理 IP        │
+      ├─────────────────────────────────────────────────────────────┼──────────────────────────────────┤
+      │ proxy_set_header X-Forwarded-Proto $scheme                  │ 记录原始请求的协议（http/https） │
+      └─────────────────────────────────────────────────────────────┴──────────────────────────────────┘
+
+      为什么 /api/ 放在 / 前面：Nginx 匹配规则是"最长前缀优先"。/api/users/1 同时匹配 / 和 /api/，但 /api/ 更长更精确，所以走 /api/ 那个块。这就是为什么你后端接口都用 /api 前缀——从阶段 1
+      开始我们就这么设计的。
+
+      X-Forwarded-For 和 X-Forwarded-Proto 是什么：
+
+      当请求经过代理时，后端拿到的 IP 是 Nginx 的 IP（因为 Nginx 转发的），不是用户的真实 IP。这两个 header 就是让后端知道"真正发起请求的人是谁、用的什么协议"。
+
+      真实公司里这两个 header 必配，否则：
+      - 后端日志里所有请求 IP 都是 Nginx 的 IP，排查问题无从下手
+      - 如果要做 IP 限流，限的全是 Nginx 的 IP，完全失效
+
+      健康检查块
+
+          location /health {
+              proxy_pass http://demo-backend-main:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+          }
+
+      和 /api/ 类似，单独配是因为 /health 不以 /api/ 开头，不配的话会走 location / 转到前端去了。
+
+      ---
+      Nginx 匹配规则总结
+
+      用户请求                  Nginx 匹配               转发到
+      ─────────────────────────────────────────────────────────
+      /                        location /               → frontend (80)
+      /index.html              location /               → frontend (80)
+      /assets/app.js           location /               → frontend (80)
+      /api/users/1             location /api/            → backend-main (8080)
+      /api/cache/hello         location /api/            → backend-main (8080)
+      /api/client/info         location /api/            → backend-main (8080)
+      /health                  location /health          → backend-main (8080)
+
+      注意：前端调 /api/client/info 是走 main 的（Nginx 转给 main），不是直接转给 client。前端永远只和 main 交互，main 内部再调 client——这就是"网关模式"。
+
+      ---
+      关于跨域问题的解决
+
+      之前我们在 main 里写了 CorsConfig 允许 localhost:5173 跨域。现在有了 Nginx：
+
+      之前（没有 Nginx）:
+        前端 http://localhost:5173 → 调后端 http://localhost:8080
+        ↑ 端口不同 = 跨域！需要 CorsConfig
+
+      现在（有 Nginx）:
+        前端 http://localhost/       → Nginx → frontend 容器
+        前端调接口 http://localhost/api/users/1 → Nginx → backend-main 容器
+        ↑ 同域名同端口 = 不跨域！
+
+      Nginx 统一入口后，跨域问题从根本上消失了。真实公司里，CorsConfig 通常只在本地开发阶段使用，上了 Nginx 后由 Nginx 统一处理跨域（如果需要的话），后端不再操心。
+
+      ---
+      你现在的动作
+
+      1. 在 demo-deploy/nginx/ 下新建 default.conf
+      2. 把上面的内容粘进去保存
+      3. 确认你的目录结构是：
+
+      demo-deploy/
+      ├── docker-compose.yml
+      └── nginx/
+          └── default.conf
